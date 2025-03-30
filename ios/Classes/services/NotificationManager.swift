@@ -60,66 +60,94 @@ class NotificationManager: NSObject {
             return
         }
 
-        // Schedule multiple notifications with exact times
-        let notificationCount = 10 // Number of notifications to schedule
-        let intervalBetweenNotifications: TimeInterval = 3.0 // 3 seconds between each notification
-        let now = Date()
+        // First, cancel any existing notifications for this alarm
+        await cancelNotification(id: id)
+
+        // Show immediate notification
+        let content = UNMutableNotificationContent()
+        content.title = notificationSettings.title
+        content.body = notificationSettings.body
+        content.sound = nil
+        if #available(iOS 15.0, *) {
+            content.interruptionLevel = .timeSensitive
+        }
+        content.userInfo = [NotificationManager.userInfoAlarmIdKey: id]
+
+        if let stopButtonTitle = notificationSettings.stopButton {
+            let categoryIdentifier = "\(NotificationManager.categoryWithActionIdentifierPrefix)\(stopButtonTitle)"
+            await registerCategoryIfNeeded(forActionTitle: stopButtonTitle)
+            content.categoryIdentifier = categoryIdentifier
+        } else {
+            content.categoryIdentifier = NotificationManager.categoryWithoutActionIdentifier
+        }
+
+        let request = UNNotificationRequest(identifier: "\(NotificationManager.notificationIdentifierPrefix)\(id)", content: content, trigger: nil)
+        do {
+            try await UNUserNotificationCenter.current().add(request)
+            os_log(.debug, log: NotificationManager.logger, "Immediate notification shown for alarm ID=%d", id)
+        } catch {
+            os_log(.error, log: NotificationManager.logger, "Error when showing alarm ID=%d notification: %@", id, error.localizedDescription)
+        }
+
+        // Schedule backup notifications 30 seconds later
+        let notificationCount = 10
+        let intervalBetweenNotifications: TimeInterval = 3.0
+        let now = Date().addingTimeInterval(30) // Start 30 seconds after now
         
         for i in 0..<notificationCount {
-            let content = UNMutableNotificationContent()
-            content.title = notificationSettings.title
-            content.body = notificationSettings.body
-            content.sound = nil // We'll handle sound playback in the notification handler
+            let backupContent = UNMutableNotificationContent()
+            backupContent.title = notificationSettings.title
+            backupContent.body = notificationSettings.body
+            backupContent.sound = UNNotificationSound.default
             if #available(iOS 15.0, *) {
-                content.interruptionLevel = .timeSensitive
+                backupContent.interruptionLevel = .timeSensitive
             }
-            content.userInfo = [
+            backupContent.userInfo = [
                 NotificationManager.userInfoAlarmIdKey: id,
                 "notificationIndex": i,
-                "totalNotifications": notificationCount
+                "totalNotifications": notificationCount,
+                "isBackupNotification": true
             ]
 
             if let stopButtonTitle = notificationSettings.stopButton {
                 let categoryIdentifier = "\(NotificationManager.categoryWithActionIdentifierPrefix)\(stopButtonTitle)"
                 await registerCategoryIfNeeded(forActionTitle: stopButtonTitle)
-                content.categoryIdentifier = categoryIdentifier
+                backupContent.categoryIdentifier = categoryIdentifier
             } else {
-                content.categoryIdentifier = NotificationManager.categoryWithoutActionIdentifier
+                backupContent.categoryIdentifier = NotificationManager.categoryWithoutActionIdentifier
             }
 
-            // Calculate exact time for this notification
             let triggerDate = now.addingTimeInterval(intervalBetweenNotifications * Double(i))
             let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: triggerDate)
             let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
             
-            let request = UNNotificationRequest(
-                identifier: "\(NotificationManager.notificationIdentifierPrefix)\(id)_\(i)",
-                content: content,
+            let backupRequest = UNNotificationRequest(
+                identifier: "\(NotificationManager.notificationIdentifierPrefix)\(id)_backup_\(i)",
+                content: backupContent,
                 trigger: trigger
             )
             
             do {
-                try await UNUserNotificationCenter.current().add(request)
+                try await UNUserNotificationCenter.current().add(backupRequest)
                 let dateFormatter = DateFormatter()
                 dateFormatter.dateStyle = .medium
                 dateFormatter.timeStyle = .medium
-                os_log(.debug, log: NotificationManager.logger, "Notification %d/%d scheduled for alarm ID=%d at %@", i + 1, notificationCount, id, dateFormatter.string(from: triggerDate))
+                os_log(.debug, log: NotificationManager.logger, "Backup notification %d/%d scheduled for alarm ID=%d at %@", i + 1, notificationCount, id, dateFormatter.string(from: triggerDate))
             } catch {
-                os_log(.error, log: NotificationManager.logger, "Error when scheduling notification %d/%d for alarm ID=%d: %@", i + 1, notificationCount, id, error.localizedDescription)
+                os_log(.error, log: NotificationManager.logger, "Error when scheduling backup notification %d/%d for alarm ID=%d: %@", i + 1, notificationCount, id, error.localizedDescription)
             }
         }
     }
 
-    func cancelNotification(id: Int) {
+    func cancelNotification(id: Int) async {
         // Cancel all notifications for this alarm ID
         let center = UNUserNotificationCenter.current()
-        center.getPendingNotificationRequests { requests in
-            let identifiersToCancel = requests
-                .filter { $0.identifier.starts(with: "\(NotificationManager.notificationIdentifierPrefix)\(id)_") }
-                .map { $0.identifier }
-            center.removePendingNotificationRequests(withIdentifiers: identifiersToCancel)
-            os_log(.debug, log: NotificationManager.logger, "Cancelled %d notifications for alarm ID=%d", identifiersToCancel.count, id)
-        }
+        let requests = await center.pendingNotificationRequests()
+        let identifiersToCancel = requests
+            .filter { $0.identifier.starts(with: "\(NotificationManager.notificationIdentifierPrefix)\(id)") }
+            .map { $0.identifier }
+        center.removePendingNotificationRequests(withIdentifiers: identifiersToCancel)
+        os_log(.debug, log: NotificationManager.logger, "Cancelled %d notifications for alarm ID=%d", identifiersToCancel.count, id)
     }
 
     func dismissNotification(id: Int) {
@@ -190,42 +218,35 @@ class NotificationManager: NSObject {
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         if !isAlarmNotification(notification) {
+            completionHandler([.badge, .sound, .alert])
             return
         }
         
         // Get notification info
         guard let userInfo = notification.request.content.userInfo as? [String: Any],
-              let alarmId = userInfo[NotificationManager.userInfoAlarmIdKey] as? Int,
-              let notificationIndex = userInfo["notificationIndex"] as? Int,
-              let totalNotifications = userInfo["totalNotifications"] as? Int else {
+              let alarmId = userInfo[NotificationManager.userInfoAlarmIdKey] as? Int else {
             completionHandler([.badge, .sound, .alert])
             return
         }
         
+        // Check if this is a backup notification
+        let isBackupNotification = userInfo["isBackupNotification"] as? Bool ?? false
+        
         // Check if the app is running by checking if the alarm is ringing
         let isAppRunning = (try? SwiftAlarmPlugin.getApi()?.isRinging(alarmId: Int64(alarmId))) ?? false
         
-        // Only reschedule notifications if the app is not running
-        if !isAppRunning && notificationIndex == totalNotifications - 1 {
-            Task {
-                // Create NotificationSettings from current notification
-                let notifSettings = NotificationSettings(
-                    title: notification.request.content.title,
-                    body: notification.request.content.body,
-                    stopButton: notification.request.content.categoryIdentifier.hasPrefix(NotificationManager.categoryWithActionIdentifierPrefix) ? 
-                                notification.request.content.categoryIdentifier.replacingOccurrences(of: NotificationManager.categoryWithActionIdentifierPrefix, with: "") : 
-                                nil
-                )
-                
-                // Reschedule notifications for the next batch
-                await self.showNotification(id: alarmId, notificationSettings: notifSettings)
-            }
-        }
-        
-        // Only show notification UI if app is not running
         if isAppRunning {
-            completionHandler([]) // Don't show notification UI when app is running
+            // If app is running, cancel all backup notifications and don't show any
+            if isBackupNotification {
+                Task {
+                    await cancelNotification(id: alarmId)
+                }
+            }
+            os_log(.debug, log: NotificationManager.logger, "App is running, suppressing notification for alarm ID=%d", alarmId)
+            completionHandler([])
         } else {
+            // If app is not running, show the notification
+            os_log(.debug, log: NotificationManager.logger, "App is not running, showing notification for alarm ID=%d", alarmId)
             completionHandler([.badge, .sound, .alert])
         }
     }

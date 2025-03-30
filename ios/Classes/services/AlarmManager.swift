@@ -49,7 +49,7 @@ class AlarmManager: NSObject {
 
     func stopAlarm(id: Int, cancelNotif: Bool) async {
         if cancelNotif {
-            NotificationManager.shared.cancelNotification(id: id)
+            await NotificationManager.shared.cancelNotification(id: id)
         }
         NotificationManager.shared.dismissNotification(id: id)
 
