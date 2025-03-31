@@ -144,15 +144,15 @@ class NotificationManager: NSObject {
 
         // Calculate the start time for backup notifications (30 seconds after alarm time)
         let backupStartTime = alarmTime.addingTimeInterval(NotificationManager.backupNotificationStartDelay)
+        let delayFromNow = backupStartTime.timeIntervalSinceNow
         
         for i in 0..<NotificationManager.maxBackupNotifications {
-            let backupTime = backupStartTime.addingTimeInterval(NotificationManager.backupNotificationInterval * Double(i))
+            let notificationDelay = delayFromNow + (NotificationManager.backupNotificationInterval * Double(i))
             
-            // Create date components for the backup notification time
-            let calendar = Calendar.current
-            let components = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: backupTime)
-            let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+            // Only schedule if the delay is positive
+            guard notificationDelay > 0 else { continue }
             
+            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: notificationDelay, repeats: false)
             let request = UNNotificationRequest(
                 identifier: "\(NotificationManager.backupNotificationIdentifierPrefix)\(id)_\(i)",
                 content: content,
@@ -161,7 +161,7 @@ class NotificationManager: NSObject {
             
             do {
                 try await UNUserNotificationCenter.current().add(request)
-                os_log(.debug, log: NotificationManager.logger, "Backup notification %d scheduled for alarm ID=%d at %{public}@", i, id, backupTime.description)
+                os_log(.debug, log: NotificationManager.logger, "Backup notification %d scheduled for alarm ID=%d with delay %{public}@ seconds", i, id, notificationDelay.description)
             } catch {
                 os_log(.error, log: NotificationManager.logger, "Error when scheduling backup notification %d for alarm ID=%d: %@", i, id, error.localizedDescription)
             }
