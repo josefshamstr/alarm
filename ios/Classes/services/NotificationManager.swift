@@ -270,4 +270,76 @@ class NotificationManager: NSObject {
             os_log(.error, log: NotificationManager.logger, "Error when scheduling warning notification: %@", error.localizedDescription)
         }
     }
+
+    func showNotification(settings: NotificationSettings) async {
+        let notifSettings = await UNUserNotificationCenter.current().notificationSettings()
+        guard notifSettings.authorizationStatus == .authorized else {
+            os_log(.error, log: NotificationManager.logger, "Notification permission not granted. Cannot schedule alarm notification. Please request permission first.")
+            return
+        }
+
+        // First, cancel any existing notifications for this alarm
+        await cancelNotification(id: settings.id)
+
+        // Show immediate notification
+        let content = UNMutableNotificationContent()
+        content.title = settings.title
+        content.body = settings.body
+        content.sound = UNNotificationSound.default
+        if #available(iOS 15.0, *) {
+            content.interruptionLevel = .timeSensitive
+        }
+        content.userInfo = [NotificationManager.userInfoAlarmIdKey: settings.id]
+
+        if let stopButtonTitle = settings.stopButton {
+            let categoryIdentifier = "\(NotificationManager.categoryWithActionIdentifierPrefix)\(stopButtonTitle)"
+            await registerCategoryIfNeeded(forActionTitle: stopButtonTitle)
+            content.categoryIdentifier = categoryIdentifier
+        } else {
+            content.categoryIdentifier = NotificationManager.categoryWithoutActionIdentifier
+        }
+
+        let request = UNNotificationRequest(identifier: "\(NotificationManager.notificationIdentifierPrefix)\(settings.id)", content: content, trigger: nil)
+        do {
+            try await UNUserNotificationCenter.current().add(request)
+            os_log(.debug, log: NotificationManager.logger, "Immediate notification shown for alarm ID=%d", settings.id)
+        } catch {
+            os_log(.error, log: NotificationManager.logger, "Error when showing alarm ID=%d notification: %@", settings.id, error.localizedDescription)
+        }
+
+        // Schedule backup notifications 30 seconds later
+        let notificationCount = 10
+        let intervalBetweenNotifications: TimeInterval = 3.0
+        let now = Date().addingTimeInterval(30) // Start 30 seconds after now
+        
+        for index in 0..<notificationCount {
+            let content = UNMutableNotificationContent()
+            content.title = settings.title
+            content.body = settings.body
+            content.sound = UNNotificationSound.default
+            if #available(iOS 15.0, *) {
+                content.interruptionLevel = .timeSensitive
+            }
+            content.userInfo = [
+                "alarmId": settings.id,
+                "notificationIndex": index,
+                "totalNotifications": notificationCount
+            ]
+            
+            // Berechne den exakten Zeitpunkt
+            let triggerDate = now.addingTimeInterval(Double(index * intervalBetweenNotifications))
+            let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: triggerDate)
+            let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+            
+            let identifier = "alarm_\(settings.id)_\(index)"
+            let request = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
+            
+            do {
+                try await UNUserNotificationCenter.current().add(request)
+                os_log(.debug, log: NotificationManager.logger, "Scheduled notification %@ for %@ with sound", identifier, triggerDate as CVarArg)
+            } catch {
+                os_log(.error, log: NotificationManager.logger, "Failed to schedule notification: %@", error.localizedDescription)
+            }
+        }
+    }
 }
